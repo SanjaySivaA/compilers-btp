@@ -1,0 +1,72 @@
+name: MLIR CI Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    name: Build & Test (LLVM ${{ matrix.llvm_branch }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        llvm_branch: [ "release/18.x", "main" ]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake lld clang ccache
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ runner.os }}-llvm-${{ matrix.llvm_branch }}
+          max-size: "1G"
+
+      - name: Clone LLVM Project
+        run: |
+          git clone --depth 1 --branch ${{ matrix.llvm_branch }} https://github.com/llvm/llvm-project.git
+
+      - name: Build LLVM and MLIR
+        run: |
+          mkdir -p llvm-project/build
+          cd llvm-project/build
+          cmake -G Ninja ../llvm \
+            -DLLVM_ENABLE_PROJECTS="mlir" \
+            -DLLVM_TARGETS_TO_BUILD="X86" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_ENABLE_ASSERTIONS=ON \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DLLVM_USE_LINKER=lld \
+            -DLLVM_CCACHE_BUILD=ON
+          ninja
+
+      - name: Build Custom MLIR Pass (toy-dialect)
+        run: |
+          cd toy-dialect
+          mkdir -p build && cd build
+          cmake -G Ninja .. \
+            -DMLIR_DIR=$GITHUB_WORKSPACE/llvm-project/build/lib/cmake/mlir \
+            -DLLVM_DIR=$GITHUB_WORKSPACE/llvm-project/build/lib/cmake/llvm \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DLLVM_USE_LINKER=lld
+          ninja
+
+      - name: Execute Pass Test
+        run: |
+          cd toy-dialect/build
+          ./my-opt --print-opt ../add.mlir -o /dev/null > output.log
+          cat output.log
+          grep -q "Visiting Op: builtin.module;" output.log
+          grep -q "Visiting Op: func.func;" output.log
+          grep -q "Visiting Op: arith.addi;" output.log
+          grep -q "Visiting Op: func.return;" output.log
