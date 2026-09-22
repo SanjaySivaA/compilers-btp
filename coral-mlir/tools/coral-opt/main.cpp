@@ -11,6 +11,9 @@
 // Pull in the custom Coral dialect
 #include "Coral/CoralDialect.h"
 
+// Linalg to Coral pass declaration
+void registerLinalgToCoralPass();
+
 int main(int argc, char **argv) {
   // 1. Create the registry
   mlir::DialectRegistry registry;
@@ -23,6 +26,9 @@ int main(int argc, char **argv) {
                   mlir::tensor::TensorDialect,
                   mlir::vector::VectorDialect,
                   mlir::coral::CoralDialect>();
+
+  // Register the Linalg to Coral pass
+  registerLinalgToCoralPass();
 
   // 3. Hand control over to the core MLIR command-line interface
   return mlir::asMainReturnCode(
