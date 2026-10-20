@@ -7,12 +7,15 @@
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 
 // Pull in the custom Coral dialect
 #include "Coral/CoralDialect.h"
 
 // Linalg to Coral pass declaration
 void registerLinalgToCoralPass();
+
+void registerCoralToLLVMPass();
 
 int main(int argc, char **argv) {
   // 1. Create the registry
@@ -27,8 +30,12 @@ int main(int argc, char **argv) {
                   mlir::vector::VectorDialect,
                   mlir::coral::CoralDialect>();
 
+  registry.insert<mlir::LLVM::LLVMDialect>();
+  
   // Register the Linalg to Coral pass
   registerLinalgToCoralPass();
+
+  registerCoralToLLVMPass();
 
   // 3. Hand control over to the core MLIR command-line interface
   return mlir::asMainReturnCode(

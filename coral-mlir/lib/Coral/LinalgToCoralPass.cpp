@@ -25,27 +25,34 @@ struct ConvertTiledMatmulToCoral : public OpRewritePattern<linalg::MatmulOp> {
     if (inputs.size() != 2 || outputs.size() != 1)
       return failure();
 
-    // Checks the shape of A
-    auto tensorType = dyn_cast<ShapedType>(inputs[0].getType());
-    if (!tensorType || !tensorType.hasStaticShape())
+    // Checks the shape of A (ShapedType works for both Tensors and MemRefs)
+    auto shapedType = dyn_cast<ShapedType>(inputs[0].getType());
+    if (!shapedType || !shapedType.hasStaticShape())
       return failure();
 
-    ArrayRef<int64_t> shape = tensorType.getShape();
+    ArrayRef<int64_t> shape = shapedType.getShape();
     // Accepting only 16x16 matrices 
     if (shape.size() != 2 || shape[0] != 16 || shape[1] != 16) {
       return failure();
     }
 
-    // Buids the new coral.matmul operation 
-    OperationState state(op.getLoc(), "coral.matmul");
-    state.addOperands(inputs);
-    state.addTypes(outputs[0].getType());
+    // --- NEW MEMREF LOGIC ---
 
-    // Create the new operation and save a pointer to it
-    Operation *newOp = rewriter.create(state);
+    // 1. Combine A, B, and C into a single list of 3 physical memory pointers
+    SmallVector<Value, 3> allOperands;
+    allOperands.push_back(inputs[0]);  // Pointer to A
+    allOperands.push_back(inputs[1]);  // Pointer to B
+    allOperands.push_back(outputs[0]); // Pointer to C (Destination)
+
+    // 2. Build the new coral.matmul operation (We do not add return types anymore)
+    OperationState state(op.getLoc(), "coral.matmul");
+    state.addOperands(allOperands);
+
+    // Create the new operation
+    rewriter.create(state);
     
-    // Replaces linalg.matmul with coral.matmul 
-    rewriter.replaceOp(op, newOp->getResults());
+    // 3. Erase the old linalg.matmul (Since there are no results to replace)
+    rewriter.eraseOp(op);
 
     return success();
   }

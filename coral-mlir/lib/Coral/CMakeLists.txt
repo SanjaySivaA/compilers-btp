@@ -1,6 +1,7 @@
 add_mlir_dialect_library(CoralDialect
   CoralDialect.cpp
   LinalgToCoralPass.cpp
+  CoralToLLVMPass.cpp
 
   DEPENDS
   CoralOpsIncGen
@@ -10,4 +11,5 @@ add_mlir_dialect_library(CoralDialect
   MLIRLinalgDialect
   MLIRPass
   MLIRTransforms
+  MLIRLLVMDialect
 )

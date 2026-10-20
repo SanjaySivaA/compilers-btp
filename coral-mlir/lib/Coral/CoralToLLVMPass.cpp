@@ -17,45 +17,41 @@ struct ConvertCoralMatmulToLLVM : public RewritePattern {
   LogicalResult matchAndRewrite(Operation *op,
                                 PatternRewriter &rewriter) const override {
     
-    // Get the LLVM Pointer Type (void or llvm.ptr)
-    auto llvmVoidTy = LLVM::LLVMVoidType::get(getContext());
+    // Cast the generic operation into our strongly-typed MatMulOp
+    auto matmulOp = cast<coral::MatMulOp>(op);
     auto llvmPtrTy = LLVM::LLVMPointerType::get(getContext());
 
-    // Define the RISC-V assembly code and constraints
-    StringRef asmStr = 
-        "vsetvli zero, 16, e8, m1, ta, ma\n\t"
+    // 1. Cast all 3 physical MemRefs into raw LLVM hardware pointers
+    auto ptrA = rewriter.create<UnrealizedConversionCastOp>(op->getLoc(), llvmPtrTy, matmulOp.getLhs()).getResult(0);
+    auto ptrB = rewriter.create<UnrealizedConversionCastOp>(op->getLoc(), llvmPtrTy, matmulOp.getRhs()).getResult(0);
+    auto ptrC = rewriter.create<UnrealizedConversionCastOp>(op->getLoc(), llvmPtrTy, matmulOp.getOut()).getResult(0);
+
+    // 2. The RISC-V Assembly String
+    llvm::StringRef asmStr = 
+        "vsetivli zero, 16, e8, m1, ta, ma\n\t"
         "vle8.v v8, ($0)\n\t"
         "vle8.v v16, ($1)\n\t"
-        "vwmacc.vv v24, v8, v16";
+        "vwmacc.vv v24, v8, v16\n\t"
+        "vse32.v v24, ($2)";
+    
+    llvm::StringRef constraints = "r,r,r";
 
-    StringRef constraints = "r,r";
-
-    // Cast the abstract PyTorch tensors into bare-metal LLVM memory pointers
-    auto ptrA = rewriter.create<UnrealizedConversionCastOp>(op->getLoc(), llvmPtrTy, op->getOperand(0));
-    auto ptrB = rewriter.create<UnrealizedConversionCastOp>(op->getLoc(), llvmPtrTy, op->getOperand(1));
-
-    // Create the Inline Assembly and feeding it the pointers
+    // 3. Generate the inline assembly block in the IR
     rewriter.create<LLVM::InlineAsmOp>(
         op->getLoc(),
-        llvmVoidTy,
-        ValueRange{ptrA.getResult(0), ptrB.getResult(0)}, 
+        LLVM::LLVMVoidType::get(getContext()), // Returns nothing
+        ValueRange{ptrA, ptrB, ptrC},          // 3 pointers
         asmStr,
         constraints,
-        true, // has_side_effects = true
-        false, // is_align_stack = false
-        mlir::LLVM::tailcallkind::TailCallKind::None,
+        /*has_side_effects=*/true,
+        /*is_align_stack=*/false,
+        LLVM::tailcallkind::TailCallKind::None, // <-- THE FIX FOR THE 11TH ARGUMENT
         LLVM::AsmDialectAttr::get(getContext(), LLVM::AsmDialect::AD_ATT),
         ArrayAttr()
     );
 
-    // Create the dummy output tensor to satisfy the 'return' statement
-    auto dummyCast = rewriter.create<UnrealizedConversionCastOp>(
-        op->getLoc(),
-        TypeRange{op->getResult(0).getType()},
-        ValueRange{}
-    );
-
-    rewriter.replaceOp(op, dummyCast.getOutputs());
+    // 4. Erase the original coral.matmul
+    rewriter.eraseOp(op);
 
     return success();
   }
