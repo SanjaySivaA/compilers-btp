@@ -4,7 +4,7 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/IR/BuiltinOps.h" 
+#include "mlir/IR/BuiltinOps.h"
 
 using namespace mlir;
 
@@ -60,28 +60,26 @@ struct ConvertCoralMatmulToLLVM : public RewritePattern {
 struct CoralToLLVMPass : public PassWrapper<CoralToLLVMPass, OperationPass<func::FuncOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(CoralToLLVMPass)
 
-  // Connects the pass to your terminal
   StringRef getArgument() const final { return "convert-coral-to-llvm"; }
-  StringRef getDescription() const final { return "Lower coral.matmul to RISC-V LLVM Inline Assembly"; }
+  StringRef getDescription() const final { return "Lower coral ops to RISC-V LLVM Inline Assembly"; }
 
-  // Forces the MLIR engine to load the LLVM infrastructure into memory before running the pass
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<mlir::LLVM::LLVMDialect>();
   }
 
-  // Runs the pattern matcher with ConvertCoralMatmulToLLVM logic on file
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
     patterns.add<ConvertCoralMatmulToLLVM>(&getContext());
+    patterns.add<ConvertCoralAddToLLVM>(&getContext());
+    patterns.add<ConvertCoralConv2DToLLVM>(&getContext());
 
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
       signalPassFailure();
   }
 };
 
-} 
+} // end anonymous namespace
 
-// Registers the pass
 void registerCoralToLLVMPass() {
   PassRegistration<CoralToLLVMPass>();
 }
