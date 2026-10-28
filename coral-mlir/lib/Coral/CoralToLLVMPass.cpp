@@ -17,14 +17,26 @@ struct ConvertCoralMatmulToLLVM : public RewritePattern {
   LogicalResult matchAndRewrite(Operation *op,
                                 PatternRewriter &rewriter) const override {
     
-    // Cast the generic operation into our strongly-typed MatMulOp
     auto matmulOp = cast<coral::MatMulOp>(op);
-    auto llvmPtrTy = LLVM::LLVMPointerType::get(getContext());
+    auto ctx = getContext();
+    
+    // Build the exact LLVM Struct type that MLIR uses for 2D MemRefs:
+    // !llvm.struct<(ptr, ptr, i64, array<2 x i64>, array<2 x i64>)>
+    auto ptrTy = LLVM::LLVMPointerType::get(ctx);
+    auto i64Ty = IntegerType::get(ctx, 64);
+    auto arrayTy = LLVM::LLVMArrayType::get(i64Ty, 2);
+    auto structTy = LLVM::LLVMStructType::getLiteral(ctx, {ptrTy, ptrTy, i64Ty, arrayTy, arrayTy});
 
-    // 1. Cast all 3 physical MemRefs into raw LLVM hardware pointers
-    auto ptrA = rewriter.create<UnrealizedConversionCastOp>(op->getLoc(), llvmPtrTy, matmulOp.getLhs()).getResult(0);
-    auto ptrB = rewriter.create<UnrealizedConversionCastOp>(op->getLoc(), llvmPtrTy, matmulOp.getRhs()).getResult(0);
-    auto ptrC = rewriter.create<UnrealizedConversionCastOp>(op->getLoc(), llvmPtrTy, matmulOp.getOut()).getResult(0);
+    // Helper function to cast the memref to the struct and extract the pointer at index 1
+    auto extractAlignedPtr = [&](Value memref) -> Value {
+        auto cast = rewriter.create<UnrealizedConversionCastOp>(op->getLoc(), structTy, memref).getResult(0);
+        return rewriter.create<LLVM::ExtractValueOp>(op->getLoc(), ptrTy, cast, ArrayRef<int64_t>{1});
+    };
+
+    // 1. Extract the physical hardware pointers from all 3 MemRefs
+    Value ptrA = extractAlignedPtr(matmulOp.getLhs());
+    Value ptrB = extractAlignedPtr(matmulOp.getRhs());
+    Value ptrC = extractAlignedPtr(matmulOp.getOut());
 
     // 2. The RISC-V Assembly String
     llvm::StringRef asmStr = 
@@ -39,14 +51,14 @@ struct ConvertCoralMatmulToLLVM : public RewritePattern {
     // 3. Generate the inline assembly block in the IR
     rewriter.create<LLVM::InlineAsmOp>(
         op->getLoc(),
-        LLVM::LLVMVoidType::get(getContext()), // Returns nothing
-        ValueRange{ptrA, ptrB, ptrC},          // 3 pointers
+        LLVM::LLVMVoidType::get(ctx), // Returns nothing
+        ValueRange{ptrA, ptrB, ptrC}, // 3 pointers
         asmStr,
         constraints,
         /*has_side_effects=*/true,
         /*is_align_stack=*/false,
-        LLVM::tailcallkind::TailCallKind::None, // <-- THE FIX FOR THE 11TH ARGUMENT
-        LLVM::AsmDialectAttr::get(getContext(), LLVM::AsmDialect::AD_ATT),
+        LLVM::tailcallkind::TailCallKind::None,
+        LLVM::AsmDialectAttr::get(ctx, LLVM::AsmDialect::AD_ATT),
         ArrayAttr()
     );
 
@@ -69,9 +81,8 @@ struct CoralToLLVMPass : public PassWrapper<CoralToLLVMPass, OperationPass<func:
 
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
+    
     patterns.add<ConvertCoralMatmulToLLVM>(&getContext());
-    patterns.add<ConvertCoralAddToLLVM>(&getContext());
-    patterns.add<ConvertCoralConv2DToLLVM>(&getContext());
 
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
       signalPassFailure();
