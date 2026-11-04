@@ -6,6 +6,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "Coral/CoralDialect.h"
+#include "mlir/Transforms/DialectConversion.h"
 
 using namespace mlir;
 
@@ -99,24 +100,71 @@ struct LinalgToCoralPass : public PassWrapper<LinalgToCoralPass, OperationPass<f
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LinalgToCoralPass)
 
   StringRef getArgument() const final { return "convert-linalg-to-coral"; }
-  StringRef getDescription() const final { return "Hijack linalg ops (matmul/conv2d) and arith.addi, converting to coral ops"; }
+  StringRef getDescription() const final { return "Partition linalg/arith ops between CPU and NPU"; }
 
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<mlir::coral::CoralDialect, mlir::arith::ArithDialect>();
   }
 
   void runOnOperation() override {
-    RewritePatternSet patterns(&getContext());
-    patterns.add<ConvertTiledMatmulToCoral>(&getContext());
-    patterns.add<ConvertArithAddIToCoral>(&getContext());
-    patterns.add<ConvertLinalgConv2DToCoral>(&getContext());
+    MLIRContext *context = &getContext();
+    RewritePatternSet patterns(context);
+    
+    // Load existing, untouched patterns
+    patterns.add<ConvertTiledMatmulToCoral>(context);
+    patterns.add<ConvertArithAddIToCoral>(context);
+    patterns.add<ConvertLinalgConv2DToCoral>(context);
 
-    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
+    // 1. Initialize the Partitioning Target
+    ConversionTarget target(*context);
+
+    // 2. Default CPU Fallback: Mark everything else dynamically legal. 
+    // This ensures loops, func.func, standard arith, etc., are safely kept for the CPU.
+    target.markUnknownOpDynamicallyLegal([](Operation *) { return true; });
+
+    // 3. NPU Territory: The Coral dialect is always legal.
+    target.addLegalDialect<mlir::coral::CoralDialect>();
+
+    // 4. Partitioning Rules: Target specific ops for the NPU based on constraints
+    target.addDynamicallyLegalOp<linalg::MatmulOp>([](linalg::MatmulOp op) {
+      auto inputs = op.getDpsInputs();
+      if (inputs.empty()) return true; // Keep on CPU
+      
+      auto tensorType = dyn_cast<ShapedType>(inputs[0].getType());
+      if (tensorType && tensorType.hasStaticShape()) {
+        ArrayRef<int64_t> shape = tensorType.getShape();
+        if (shape.size() == 2 && shape[0] == 16 && shape[1] == 16) {
+          return false; // ILLEGAL: Matches our 16x16 constraint. Must go to NPU!
+        }
+      }
+      return true; // LEGAL: Keep on CPU
+    });
+
+    target.addDynamicallyLegalOp<arith::AddIOp>([](arith::AddIOp op) {
+      auto tensorType = dyn_cast<ShapedType>(op.getType());
+      if (tensorType && tensorType.hasStaticShape()) {
+        ArrayRef<int64_t> shape = tensorType.getShape();
+        if (shape.size() == 2 && shape[0] == 16 && shape[1] == 16) {
+          return false; // ILLEGAL: NPU bound
+        }
+      }
+      return true; // LEGAL: Keep on CPU
+    });
+
+    target.addDynamicallyLegalOp<linalg::Conv2DNhwcHwcfOp>([](linalg::Conv2DNhwcHwcfOp op) {
+      // Mirroring pattern's requirements
+      if (op.getDpsInputs().size() == 2 && op.getDpsInits().size() == 1) {
+        return false; // ILLEGAL: NPU bound
+      }
+      return true; // LEGAL: Keep on CPU
+    });
+
+    // 5. Apply the partition
+    if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))))
       signalPassFailure();
   }
 };
-
-} // end anonymous namespace
+}
 
 void registerLinalgToCoralPass() {
   PassRegistration<LinalgToCoralPass>();
