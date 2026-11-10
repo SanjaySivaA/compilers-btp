@@ -21,6 +21,10 @@ static Value extractAlignedPtr(PatternRewriter &rewriter, Location loc, Value me
   return rewriter.create<LLVM::ExtractValueOp>(loc, ptrTy, cast, ArrayRef<int64_t>{1});
 }
 
+// ============================================================================
+// STAGE 1 REWRITE PATTERNS: Compute Kernels
+// ============================================================================
+
 // 1. Lower coral.matmul -> coral_runtime_exec_matmul(ptrA, ptrB, ptrC)
 struct ConvertCoralMatmulToLLVM : public RewritePattern {
   ConvertCoralMatmulToLLVM(MLIRContext *context)
@@ -34,7 +38,6 @@ struct ConvertCoralMatmulToLLVM : public RewritePattern {
     if (op->getNumOperands() < 3)
       return failure();
 
-    // Module-level runtime symbol lookup or creation
     auto module = op->getParentOfType<ModuleOp>();
     auto runtimeFunc = module.lookupSymbol<LLVM::LLVMFuncOp>("coral_runtime_exec_matmul");
 
@@ -130,33 +133,118 @@ struct ConvertCoralAddToLLVM : public RewritePattern {
 
       auto voidTy = LLVM::LLVMVoidType::get(ctx);
       auto ptrTy = LLVM::LLVMPointerType::get(ctx);
-      auto funcTy = LLVM::LLVMFunctionType::get(voidTy, {ptrTy, ptrTy});
 
+      SmallVector<Type, 3> paramTypes;
+      for (unsigned i = 0; i < op->getNumOperands(); ++i)
+        paramTypes.push_back(ptrTy);
+
+      auto funcTy = LLVM::LLVMFunctionType::get(voidTy, paramTypes);
       runtimeFunc = rewriter.create<LLVM::LLVMFuncOp>(
           loc, "coral_runtime_exec_add", funcTy);
     }
 
-    Value ptrA = extractAlignedPtr(rewriter, loc, op->getOperand(0), ctx);
-    Value ptrB = extractAlignedPtr(rewriter, loc, op->getOperand(1), ctx);
+    SmallVector<Value, 3> ptrs;
+    for (unsigned i = 0; i < op->getNumOperands(); ++i)
+      ptrs.push_back(extractAlignedPtr(rewriter, loc, op->getOperand(i), ctx));
 
-    rewriter.create<LLVM::CallOp>(
-        loc,
-        runtimeFunc,
-        ValueRange{ptrA, ptrB}
-    );
-
+    rewriter.create<LLVM::CallOp>(loc, runtimeFunc, ptrs);
     rewriter.eraseOp(op);
     return success();
   }
 };
 
-// Target ModuleOp for module-level symbol insertions
+// ============================================================================
+// STAGE 2 REWRITE PATTERNS: Fused Elementwise Operations
+// ============================================================================
+
+// 4. Lower coral.bn_relu -> coral_runtime_exec_bn_relu(ptrX, ptrMean, ptrScale, ptrBias, ptrOut)
+struct ConvertCoralBnReluToLLVM : public RewritePattern {
+  ConvertCoralBnReluToLLVM(MLIRContext *context)
+      : RewritePattern("coral.bn_relu", /*benefit=*/1, context) {}
+
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = op->getLoc();
+    auto ctx = getContext();
+
+    if (op->getNumOperands() < 5)
+      return failure();
+
+    auto module = op->getParentOfType<ModuleOp>();
+    auto runtimeFunc = module.lookupSymbol<LLVM::LLVMFuncOp>("coral_runtime_exec_bn_relu");
+
+    if (!runtimeFunc) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(module.getBody());
+
+      auto voidTy = LLVM::LLVMVoidType::get(ctx);
+      auto ptrTy  = LLVM::LLVMPointerType::get(ctx);
+      // Signature: (ptr X, ptr mean, ptr scale, ptr bias, ptr out)
+      auto funcTy = LLVM::LLVMFunctionType::get(voidTy, {ptrTy, ptrTy, ptrTy, ptrTy, ptrTy});
+
+      runtimeFunc = rewriter.create<LLVM::LLVMFuncOp>(
+          loc, "coral_runtime_exec_bn_relu", funcTy);
+    }
+
+    SmallVector<Value, 5> ptrs;
+    for (unsigned i = 0; i < op->getNumOperands(); ++i)
+      ptrs.push_back(extractAlignedPtr(rewriter, loc, op->getOperand(i), ctx));
+
+    rewriter.create<LLVM::CallOp>(loc, runtimeFunc, ptrs);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+// 5. Lower coral.add_relu -> coral_runtime_exec_add_relu(ptrX, ptrResidual, ptrOut)
+struct ConvertCoralAddReluToLLVM : public RewritePattern {
+  ConvertCoralAddReluToLLVM(MLIRContext *context)
+      : RewritePattern("coral.add_relu", /*benefit=*/1, context) {}
+
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = op->getLoc();
+    auto ctx = getContext();
+
+    if (op->getNumOperands() < 3)
+      return failure();
+
+    auto module = op->getParentOfType<ModuleOp>();
+    auto runtimeFunc = module.lookupSymbol<LLVM::LLVMFuncOp>("coral_runtime_exec_add_relu");
+
+    if (!runtimeFunc) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(module.getBody());
+
+      auto voidTy = LLVM::LLVMVoidType::get(ctx);
+      auto ptrTy  = LLVM::LLVMPointerType::get(ctx);
+      // Signature: (ptr X, ptr residual, ptr out)
+      auto funcTy = LLVM::LLVMFunctionType::get(voidTy, {ptrTy, ptrTy, ptrTy});
+
+      runtimeFunc = rewriter.create<LLVM::LLVMFuncOp>(
+          loc, "coral_runtime_exec_add_relu", funcTy);
+    }
+
+    SmallVector<Value, 3> ptrs;
+    for (unsigned i = 0; i < op->getNumOperands(); ++i)
+      ptrs.push_back(extractAlignedPtr(rewriter, loc, op->getOperand(i), ctx));
+
+    rewriter.create<LLVM::CallOp>(loc, runtimeFunc, ptrs);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+// ============================================================================
+// PASS DEFINITION
+// ============================================================================
+
 struct CoralToLLVMPass : public PassWrapper<CoralToLLVMPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(CoralToLLVMPass)
 
   StringRef getArgument() const final { return "convert-coral-to-llvm"; }
   StringRef getDescription() const final {
-    return "Lower Coral dialect ops (matmul, conv2d, add) to host C runtime driver calls";
+    return "Lower Coral dialect ops (matmul, conv2d, add, bn_relu, add_relu) to host C runtime driver calls";
   }
 
   void getDependentDialects(DialectRegistry &registry) const override {
@@ -165,9 +253,13 @@ struct CoralToLLVMPass : public PassWrapper<CoralToLLVMPass, OperationPass<Modul
 
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
+    // Stage 1 patterns
     patterns.add<ConvertCoralMatmulToLLVM>(&getContext());
     patterns.add<ConvertCoralConv2DToLLVM>(&getContext());
     patterns.add<ConvertCoralAddToLLVM>(&getContext());
+    // Stage 2 patterns
+    patterns.add<ConvertCoralBnReluToLLVM>(&getContext());
+    patterns.add<ConvertCoralAddReluToLLVM>(&getContext());
 
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
       signalPassFailure();
