@@ -12,6 +12,7 @@ using namespace mlir;
 
 namespace {
 
+// 1. Tiled Matmul Pattern (16x16 static shape) -> coral.matmul
 struct ConvertTiledMatmulToCoral : public OpRewritePattern<linalg::MatmulOp> {
   ConvertTiledMatmulToCoral(MLIRContext *context)
       : OpRewritePattern<linalg::MatmulOp>(context, /*benefit=*/1) {}
@@ -24,46 +25,43 @@ struct ConvertTiledMatmulToCoral : public OpRewritePattern<linalg::MatmulOp> {
     if (inputs.size() != 2 || outputs.size() != 1)
       return failure();
 
-    // Checks the shape of A (ShapedType works for both Tensors and MemRefs)
     auto shapedType = dyn_cast<ShapedType>(inputs[0].getType());
     if (!shapedType || !shapedType.hasStaticShape())
       return failure();
 
     ArrayRef<int64_t> shape = shapedType.getShape();
-    // Accepting only 16x16 matrices 
     if (shape.size() != 2 || shape[0] != 16 || shape[1] != 16) {
       return failure();
     }
 
-    // --- NEW MEMREF LOGIC ---
-
-    // 1. Combine A, B, and C into a single list of 3 physical memory pointers
     SmallVector<Value, 3> allOperands;
     allOperands.push_back(inputs[0]);  // Pointer to A
     allOperands.push_back(inputs[1]);  // Pointer to B
     allOperands.push_back(outputs[0]); // Pointer to C (Destination)
 
-    // 2. Build the new coral.matmul operation (We do not add return types anymore)
     OperationState state(op.getLoc(), "coral.matmul");
     state.addOperands(allOperands);
 
-    // Create the new operation
-    rewriter.create(state);
-    
-    // 3. Erase the old linalg.matmul (Since there are no results to replace)
-    rewriter.eraseOp(op);
+    if (op.hasTensorSemantics()) {
+      state.addTypes(outputs[0].getType());
+      Operation *newOp = rewriter.create(state);
+      rewriter.replaceOp(op, newOp->getResults());
+    } else {
+      rewriter.create(state);
+      rewriter.eraseOp(op);
+    }
 
     return success();
   }
 };
 
+// 2. Tiled Integer Addition Pattern (16x16) -> coral.add
 struct ConvertArithAddIToCoral : public OpRewritePattern<arith::AddIOp> {
   ConvertArithAddIToCoral(MLIRContext *context)
       : OpRewritePattern<arith::AddIOp>(context, /*benefit=*/1) {}
 
   LogicalResult matchAndRewrite(arith::AddIOp op,
                                 PatternRewriter &rewriter) const override {
-    
     auto tensorType = dyn_cast<ShapedType>(op.getType());
     if (!tensorType || !tensorType.hasStaticShape())
       return failure();
@@ -84,31 +82,85 @@ struct ConvertArithAddIToCoral : public OpRewritePattern<arith::AddIOp> {
   }
 };
 
-// The Pattern: Hunt for NHWC 2D Convolutions
-struct ConvertLinalgConv2DToCoral : public OpRewritePattern<linalg::Conv2DNhwcHwcfOp> {
-  ConvertLinalgConv2DToCoral(MLIRContext *context)
-      : OpRewritePattern<linalg::Conv2DNhwcHwcfOp>(context, /*benefit=*/1) {}
+// 3. NCHW 2D Convolution Pattern (Torch-MLIR default) -> coral.conv2d
+struct ConvertLinalgConv2DNchwToCoral : public OpRewritePattern<linalg::Conv2DNchwFchwOp> {
+  ConvertLinalgConv2DNchwToCoral(MLIRContext *context)
+      : OpRewritePattern<linalg::Conv2DNchwFchwOp>(context, /*benefit=*/1) {}
 
-  LogicalResult matchAndRewrite(linalg::Conv2DNhwcHwcfOp op,
+  LogicalResult matchAndRewrite(linalg::Conv2DNchwFchwOp op,
                                 PatternRewriter &rewriter) const override {
-    
     auto inputs = op.getDpsInputs();
     auto outputs = op.getDpsInits();
 
     if (inputs.size() != 2 || outputs.size() != 1)
       return failure();
 
-    OperationState state(op.getLoc(), "coral.conv2d");
-    state.addOperands(inputs);
-    state.addTypes(outputs[0].getType());
+    SmallVector<Value, 3> allOperands;
+    allOperands.push_back(inputs[0]);  // Input tensor/memref [N, C, H, W]
+    allOperands.push_back(inputs[1]);  // Filter tensor/memref [F, C, KH, KW]
+    allOperands.push_back(outputs[0]); // Output destination [N, F, OH, OW]
 
-    Operation *newOp = rewriter.create(state);
-    rewriter.replaceOp(op, newOp->getResults());
+    OperationState state(op.getLoc(), "coral.conv2d");
+    state.addOperands(allOperands);
+
+    if (auto strides = op.getStrides())
+      state.addAttribute("strides", strides);
+    if (auto dilations = op.getDilations())
+      state.addAttribute("dilations", dilations);
+
+    if (op.hasTensorSemantics()) {
+      state.addTypes(outputs[0].getType());
+      Operation *newOp = rewriter.create(state);
+      rewriter.replaceOp(op, newOp->getResults());
+    } else {
+      rewriter.create(state);
+      rewriter.eraseOp(op);
+    }
 
     return success();
   }
 };
 
+// 4. NHWC 2D Convolution Pattern (Fallback) -> coral.conv2d
+struct ConvertLinalgConv2DNhwcToCoral : public OpRewritePattern<linalg::Conv2DNhwcHwcfOp> {
+  ConvertLinalgConv2DNhwcToCoral(MLIRContext *context)
+      : OpRewritePattern<linalg::Conv2DNhwcHwcfOp>(context, /*benefit=*/1) {}
+
+  LogicalResult matchAndRewrite(linalg::Conv2DNhwcHwcfOp op,
+                                PatternRewriter &rewriter) const override {
+    auto inputs = op.getDpsInputs();
+    auto outputs = op.getDpsInits();
+
+    if (inputs.size() != 2 || outputs.size() != 1)
+      return failure();
+
+    SmallVector<Value, 3> allOperands;
+    allOperands.push_back(inputs[0]);
+    allOperands.push_back(inputs[1]);
+    allOperands.push_back(outputs[0]);
+
+    OperationState state(op.getLoc(), "coral.conv2d");
+    state.addOperands(allOperands);
+
+    if (auto strides = op.getStrides())
+      state.addAttribute("strides", strides);
+    if (auto dilations = op.getDilations())
+      state.addAttribute("dilations", dilations);
+
+    if (op.hasTensorSemantics()) {
+      state.addTypes(outputs[0].getType());
+      Operation *newOp = rewriter.create(state);
+      rewriter.replaceOp(op, newOp->getResults());
+    } else {
+      rewriter.create(state);
+      rewriter.eraseOp(op);
+    }
+
+    return success();
+  }
+};
+
+// Pass Definition
 struct LinalgToCoralPass : public PassWrapper<LinalgToCoralPass, OperationPass<func::FuncOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LinalgToCoralPass)
 
