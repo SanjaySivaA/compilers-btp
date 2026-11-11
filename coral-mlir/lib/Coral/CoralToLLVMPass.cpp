@@ -236,6 +236,70 @@ struct ConvertCoralAddReluToLLVM : public RewritePattern {
 };
 
 // ============================================================================
+// STAGE 3 REWRITE PATTERNS: Shape & Memory Operations
+// ============================================================================
+
+// 6. Lower coral.dma_pad -> coral_runtime_exec_dma_pad(ptrSrc, ptrDst, lowPadH, highPadH, lowPadW, highPadW)
+struct ConvertCoralDmaPadToLLVM : public RewritePattern {
+  ConvertCoralDmaPadToLLVM(MLIRContext *context)
+      : RewritePattern("coral.dma_pad", /*benefit=*/1, context) {}
+
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = op->getLoc();
+    auto ctx = getContext();
+
+    if (op->getNumOperands() < 2)
+      return failure();
+
+    auto module = op->getParentOfType<ModuleOp>();
+    auto runtimeFunc = module.lookupSymbol<LLVM::LLVMFuncOp>("coral_runtime_exec_dma_pad");
+
+    if (!runtimeFunc) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(module.getBody());
+
+      auto voidTy = LLVM::LLVMVoidType::get(ctx);
+      auto ptrTy  = LLVM::LLVMPointerType::get(ctx);
+      auto i64Ty  = IntegerType::get(ctx, 64);
+      // Signature: (ptr src, ptr dst, i64 low_pad_h, i64 high_pad_h, i64 low_pad_w, i64 high_pad_w)
+      auto funcTy = LLVM::LLVMFunctionType::get(
+          voidTy, {ptrTy, ptrTy, i64Ty, i64Ty, i64Ty, i64Ty});
+
+      runtimeFunc = rewriter.create<LLVM::LLVMFuncOp>(
+          loc, "coral_runtime_exec_dma_pad", funcTy);
+    }
+
+    Value ptrSrc = extractAlignedPtr(rewriter, loc, op->getOperand(0), ctx);
+    Value ptrDst = extractAlignedPtr(rewriter, loc, op->getOperand(1), ctx);
+
+    int64_t lowH = 0, highH = 0, lowW = 0, highW = 0;
+    if (auto lowAttr = op->getAttrOfType<ArrayAttr>("low_pad")) {
+      if (lowAttr.size() >= 4) {
+        lowH = cast<IntegerAttr>(lowAttr[2]).getInt();
+        lowW = cast<IntegerAttr>(lowAttr[3]).getInt();
+      }
+    }
+    if (auto highAttr = op->getAttrOfType<ArrayAttr>("high_pad")) {
+      if (highAttr.size() >= 4) {
+        highH = cast<IntegerAttr>(highAttr[2]).getInt();
+        highW = cast<IntegerAttr>(highAttr[3]).getInt();
+      }
+    }
+
+    Value valLowH  = rewriter.create<LLVM::ConstantOp>(loc, rewriter.getI64IntegerAttr(lowH));
+    Value valHighH = rewriter.create<LLVM::ConstantOp>(loc, rewriter.getI64IntegerAttr(highH));
+    Value valLowW  = rewriter.create<LLVM::ConstantOp>(loc, rewriter.getI64IntegerAttr(lowW));
+    Value valHighW = rewriter.create<LLVM::ConstantOp>(loc, rewriter.getI64IntegerAttr(highW));
+
+    rewriter.create<LLVM::CallOp>(
+        loc, runtimeFunc, ValueRange{ptrSrc, ptrDst, valLowH, valHighH, valLowW, valHighW});
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+// ============================================================================
 // PASS DEFINITION
 // ============================================================================
 
@@ -244,7 +308,7 @@ struct CoralToLLVMPass : public PassWrapper<CoralToLLVMPass, OperationPass<Modul
 
   StringRef getArgument() const final { return "convert-coral-to-llvm"; }
   StringRef getDescription() const final {
-    return "Lower Coral dialect ops (matmul, conv2d, add, bn_relu, add_relu) to host C runtime driver calls";
+    return "Lower Coral dialect ops (matmul, conv2d, add, bn_relu, add_relu, dma_pad) to host C runtime driver calls";
   }
 
   void getDependentDialects(DialectRegistry &registry) const override {
@@ -260,6 +324,8 @@ struct CoralToLLVMPass : public PassWrapper<CoralToLLVMPass, OperationPass<Modul
     // Stage 2 patterns
     patterns.add<ConvertCoralBnReluToLLVM>(&getContext());
     patterns.add<ConvertCoralAddReluToLLVM>(&getContext());
+    // Stage 3 patterns
+    patterns.add<ConvertCoralDmaPadToLLVM>(&getContext());
 
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
       signalPassFailure();

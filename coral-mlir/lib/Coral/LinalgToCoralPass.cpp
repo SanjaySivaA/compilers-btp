@@ -1,5 +1,6 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Pass/Pass.h"
@@ -293,6 +294,41 @@ struct FuseResidualAddReLUPattern : public OpRewritePattern<linalg::GenericOp> {
 };
 
 // ============================================================================
+// STAGE 3 PATTERNS: Shape & Memory Operations
+// ============================================================================
+
+// 7. Tensor Padding Pattern -> coral.dma_pad
+struct LowerTensorPadToCoralDMA : public OpRewritePattern<tensor::PadOp> {
+  LowerTensorPadToCoralDMA(MLIRContext *context)
+      : OpRewritePattern<tensor::PadOp>(context, /*benefit=*/1) {}
+
+  LogicalResult matchAndRewrite(tensor::PadOp padOp,
+                                PatternRewriter &rewriter) const override {
+    Location loc = padOp.getLoc();
+    Value source = padOp.getSource();
+
+    SmallVector<int64_t> lowPad  = padOp.getStaticLow();
+    SmallVector<int64_t> highPad = padOp.getStaticHigh();
+
+    OperationState state(loc, "coral.dma_pad");
+    state.addOperands({source});
+    state.addAttribute("low_pad", rewriter.getI64ArrayAttr(lowPad));
+    state.addAttribute("high_pad", rewriter.getI64ArrayAttr(highPad));
+
+    if (padOp.getType()) {
+      state.addTypes(padOp.getType());
+      Operation *dmaOp = rewriter.create(state);
+      rewriter.replaceOp(padOp, dmaOp->getResults());
+    } else {
+      rewriter.create(state);
+      rewriter.eraseOp(padOp);
+    }
+
+    return success();
+  }
+};
+
+// ============================================================================
 // PASS DEFINITION
 // ============================================================================
 
@@ -301,11 +337,11 @@ struct LinalgToCoralPass : public PassWrapper<LinalgToCoralPass, OperationPass<f
 
   StringRef getArgument() const final { return "convert-linalg-to-coral"; }
   StringRef getDescription() const final {
-    return "Partition linalg/arith ops and fold elementwise BatchNorm/ReLU into Coral NPU ops";
+    return "Partition linalg/arith ops, fold BatchNorm/ReLU, and offload memory padding to Coral NPU ops";
   }
 
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<mlir::coral::CoralDialect, mlir::arith::ArithDialect>();
+    registry.insert<mlir::coral::CoralDialect, mlir::arith::ArithDialect, mlir::tensor::TensorDialect>();
   }
 
   void runOnOperation() override {
@@ -321,6 +357,9 @@ struct LinalgToCoralPass : public PassWrapper<LinalgToCoralPass, OperationPass<f
     // Register Stage 2 patterns
     patterns.add<FuseBatchNormReLUPattern>(context);
     patterns.add<FuseResidualAddReLUPattern>(context);
+
+    // Register Stage 3 patterns
+    patterns.add<LowerTensorPadToCoralDMA>(context);
 
     // Initialize Conversion Target
     ConversionTarget target(*context);
@@ -391,6 +430,11 @@ struct LinalgToCoralPass : public PassWrapper<LinalgToCoralPass, OperationPass<f
       }
 
       return true; // LEGAL -> Keep on CPU
+    });
+
+    // Stage 3 Legality Rules: Intercept tensor.pad operations
+    target.addDynamicallyLegalOp<tensor::PadOp>([](tensor::PadOp op) {
+      return false; // ILLEGAL -> Offload padding to coral.dma_pad
     });
 
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))))
