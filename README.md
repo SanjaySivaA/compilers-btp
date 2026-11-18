@@ -75,3 +75,19 @@ compilers-btp/
 ## Dependencies
 
 Install **torch-mlir** using: `pip install torch-mlir -f https://llvm.github.io/torch-mlir/package-index/ --extra-index-url https://download.pytorch.org/whl/cpu`
+
+As of now, the runtime is tested using a dummy source compiled using:
+
+```bash
+cd ~/compilers-btp/runtime
+
+riscv64-unknown-elf-gcc -march=rv32imf -mabi=ilp32 -O2 -T linker.ld start.s target_main.c -o firmware.elf -nostdlib
+```
+
+This is then executed by the python runner `run_sim.py`.
+
+```bash
+python3 run_sim.py firmware.elf --timeout 2.0 --out result.bin --log-out simulation.log
+```
+
+Might need to link the llc output to coral specs using lld
