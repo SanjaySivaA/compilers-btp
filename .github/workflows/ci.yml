@@ -35,8 +35,8 @@ jobs:
           # Add bin directory to GitHub Actions PATH for subsequent steps
           echo "$PWD/xpack-riscv-none-elf-gcc-13.2.0/bin" >> $GITHUB_PATH
           
-          # Verify installation
-          riscv-none-elf-gcc --version
+          # Verify installation using absolute path in this current step
+          $PWD/xpack-riscv-none-elf-gcc-13.2.0/bin/riscv-none-elf-gcc --version
 
       # 4. Build the custom runtime target with Bazel
       - name: Build Simulator Runtime
@@ -48,7 +48,7 @@ jobs:
       - name: Run Simulation Test
         run: |
           cd runtime
-          # Compile firmware using xPack toolchain (note the binary name prefix)
+          # Compile firmware using xPack toolchain
           riscv-none-elf-gcc -march=rv32imf -mabi=ilp32 -O2 -T linker.ld start.s target_main.c -o firmware.elf -nostdlib
           
           # Execute Python runner driver
