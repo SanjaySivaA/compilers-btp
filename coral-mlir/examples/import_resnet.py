@@ -1,3 +1,5 @@
+import torch
+import torchvision
 import torchvision.models as models
 import torch_mlir
 from torch_mlir.fx import OutputType
