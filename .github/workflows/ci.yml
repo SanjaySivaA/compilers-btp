@@ -1,0 +1,43 @@
+name: BTP Simulator CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout main repo and recursively initialize submodules
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # 2. Apply custom runtime patch to coral-mpact submodule
+      - name: Apply Coral-MPACT Custom Runtime Patch
+        run: |
+          echo "Applying local patch to submodule..."
+          cd third_party/coral-mpact
+          git apply ../../coral-runtime.patch
+          git status
+
+      # 3. Build the custom runtime target with Bazel
+      - name: Build Simulator Runtime
+        run: |
+          cd third_party/coral-mpact
+          bazel build //sim:coral_runtime
+
+      # 4. Build Firmware and Run Simulation Test
+      - name: Run Simulation Test
+        run: |
+          cd runtime
+          # Compile firmware (assuming riscv toolchain is available or installed in CI)
+          riscv64-unknown-elf-gcc -march=rv32imf -mabi=ilp32 -O2 -T linker.ld start.s target_main.c -o firmware.elf -nostdlib
+          
+          # Execute Python runner driver
+          python3 run_sim.py firmware.elf --timeout 2.0 --out result.bin --log-out simulation.log
+          cat simulation.log
