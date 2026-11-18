@@ -25,18 +25,22 @@ jobs:
           git apply ../../coral-runtime.patch
           git status
 
-      # 3. Install xPack RISC-V GCC Toolchain
+      # 3. Install xPack RISC-V GCC Toolchain (dynamic path resolution)
       - name: Setup xPack RISC-V GCC Toolchain
         run: |
           echo "Downloading xPack RISC-V GCC..."
           wget -q https://github.com/xpack-dev-tools/riscv-none-elf-gcc-xpack/releases/download/v13.2.0-2/xpack-riscv-none-elf-gcc-13.2.0-2-linux-x64.tar.gz
           tar -xzf xpack-riscv-none-elf-gcc-13.2.0-2-linux-x64.tar.gz
           
-          # Add bin directory to GitHub Actions PATH for subsequent steps
-          echo "$PWD/xpack-riscv-none-elf-gcc-13.2.0/bin" >> $GITHUB_PATH
+          # Resolve the exact extracted bin folder dynamically
+          TOOLCHAIN_BIN=$(pwd)/$(ls -d xpack-riscv-none-elf-gcc-*/bin | head -n 1)
+          echo "Resolved toolchain bin path: $TOOLCHAIN_BIN"
           
-          # Verify installation using absolute path in this current step
-          $PWD/xpack-riscv-none-elf-gcc-13.2.0/bin/riscv-none-elf-gcc --version
+          # Add bin directory to GitHub Actions PATH for subsequent steps
+          echo "$TOOLCHAIN_BIN" >> $GITHUB_PATH
+          
+          # Verify installation using the resolved path in this current step
+          $TOOLCHAIN_BIN/riscv-none-elf-gcc --version
 
       # 4. Build the custom runtime target with Bazel
       - name: Build Simulator Runtime
