@@ -47,7 +47,7 @@ struct ConvertTiledMatmulToCoral : public OpRewritePattern<linalg::MatmulOp> {
     OperationState state(op.getLoc(), "coral.matmul");
     state.addOperands(allOperands);
 
-    if (op.hasTensorSemantics()) {
+    if (op.hasPureTensorSemantics()) {
       state.addTypes(outputs[0].getType());
       Operation *newOp = rewriter.create(state);
       rewriter.replaceOp(op, newOp->getResults());
@@ -113,7 +113,7 @@ struct ConvertLinalgConv2DNchwToCoral : public OpRewritePattern<linalg::Conv2DNc
     if (auto dilations = op.getDilations())
       state.addAttribute("dilations", dilations);
 
-    if (op.hasTensorSemantics()) {
+    if (op.hasPureTensorSemantics()) {
       state.addTypes(outputs[0].getType());
       Operation *newOp = rewriter.create(state);
       rewriter.replaceOp(op, newOp->getResults());
@@ -152,7 +152,7 @@ struct ConvertLinalgConv2DNhwcToCoral : public OpRewritePattern<linalg::Conv2DNh
     if (auto dilations = op.getDilations())
       state.addAttribute("dilations", dilations);
 
-    if (op.hasTensorSemantics()) {
+    if (op.hasPureTensorSemantics()) {
       state.addTypes(outputs[0].getType());
       Operation *newOp = rewriter.create(state);
       rewriter.replaceOp(op, newOp->getResults());
@@ -177,7 +177,7 @@ struct FuseBatchNormReLUPattern : public OpRewritePattern<linalg::GenericOp> {
 
   LogicalResult matchAndRewrite(linalg::GenericOp genericOp,
                                 PatternRewriter &rewriter) const override {
-    Block &block = genericOp.getBlock();
+    Block &block = *genericOp.getBlock();
     auto &ops = block.getOperations();
 
     if (ops.size() < 6)
@@ -218,7 +218,7 @@ struct FuseBatchNormReLUPattern : public OpRewritePattern<linalg::GenericOp> {
     OperationState state(genericOp.getLoc(), "coral.bn_relu");
     state.addOperands(operands);
 
-    if (genericOp.hasTensorSemantics()) {
+    if (genericOp.hasPureTensorSemantics()) {
       state.addTypes(outputs[0].getType());
       Operation *fusedOp = rewriter.create(state);
       rewriter.replaceOp(genericOp, fusedOp->getResults());
@@ -239,7 +239,7 @@ struct FuseResidualAddReLUPattern : public OpRewritePattern<linalg::GenericOp> {
 
   LogicalResult matchAndRewrite(linalg::GenericOp genericOp,
                                 PatternRewriter &rewriter) const override {
-    Block &block = genericOp.getBlock();
+    Block &block = *genericOp.getBlock();
     auto &ops = block.getOperations();
 
     if (ops.size() < 3 || ops.size() > 4)
@@ -280,7 +280,7 @@ struct FuseResidualAddReLUPattern : public OpRewritePattern<linalg::GenericOp> {
     OperationState state(genericOp.getLoc(), "coral.add_relu");
     state.addOperands(operands);
 
-    if (genericOp.hasTensorSemantics()) {
+    if (genericOp.hasPureTensorSemantics()) {
       state.addTypes(outputs[0].getType());
       Operation *fusedOp = rewriter.create(state);
       rewriter.replaceOp(genericOp, fusedOp->getResults());
@@ -307,8 +307,8 @@ struct LowerTensorPadToCoralDMA : public OpRewritePattern<tensor::PadOp> {
     Location loc = padOp.getLoc();
     Value source = padOp.getSource();
 
-    SmallVector<int64_t> lowPad  = padOp.getStaticLow();
-    SmallVector<int64_t> highPad = padOp.getStaticHigh();
+    SmallVector<int64_t> lowPad(padOp.getStaticLow());
+    SmallVector<int64_t> highPad(padOp.getStaticHigh());
 
     OperationState state(loc, "coral.dma_pad");
     state.addOperands({source});
@@ -412,7 +412,7 @@ struct LinalgToCoralPass : public PassWrapper<LinalgToCoralPass, OperationPass<f
 
     // Stage 2 Legality Rules: Intercept generic ops matching BatchNorm+ReLU or Residual Add+ReLU
     target.addDynamicallyLegalOp<linalg::GenericOp>([](linalg::GenericOp op) {
-      Block &block = op.getBlock();
+      Block &block = *op.getBlock();
       auto &ops = block.getOperations();
 
       // Check for BatchNorm + ReLU sequence (subf -> mulf -> addf -> cmpf -> select -> yield)

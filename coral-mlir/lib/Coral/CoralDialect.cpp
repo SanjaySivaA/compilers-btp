@@ -20,4 +20,5 @@ CoralDialect::CoralDialect(mlir::MLIRContext *context)
 #define GET_OP_LIST
 #include "Coral/CoralOps.cpp.inc"
       >();
+  allowUnknownOperations();
 }

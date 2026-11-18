@@ -5,6 +5,8 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 
 using namespace mlir;
 
@@ -14,12 +16,79 @@ namespace {
 static Value extractAlignedPtr(PatternRewriter &rewriter, Location loc, Value memref, MLIRContext *ctx) {
   auto ptrTy = LLVM::LLVMPointerType::get(ctx);
   auto i64Ty = IntegerType::get(ctx, 64);
-  auto arrayTy = LLVM::LLVMArrayType::get(i64Ty, 2);
+  int64_t rank = 2;
+  if (auto memrefTy = dyn_cast<MemRefType>(memref.getType()))
+    rank = memrefTy.getRank();
+  auto arrayTy = LLVM::LLVMArrayType::get(i64Ty, rank);
   auto structTy = LLVM::LLVMStructType::getLiteral(ctx, {ptrTy, ptrTy, i64Ty, arrayTy, arrayTy});
 
   auto cast = rewriter.create<UnrealizedConversionCastOp>(loc, structTy, memref).getResult(0);
   return rewriter.create<LLVM::ExtractValueOp>(loc, ptrTy, cast, ArrayRef<int64_t>{1});
 }
+
+struct BufferizeCoralPass : public PassWrapper<BufferizeCoralPass, OperationPass<func::FuncOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(BufferizeCoralPass)
+
+  StringRef getArgument() const final { return "bufferize-coral"; }
+  StringRef getDescription() const final {
+    return "Convert tensor-returning coral.* ops into memref Destination-Passing Style";
+  }
+
+  void getDependentDialects(DialectRegistry &registry) const override {
+    registry.insert<mlir::bufferization::BufferizationDialect, mlir::memref::MemRefDialect>();
+  }
+
+  void runOnOperation() override {
+    func::FuncOp func = getOperation();
+    OpBuilder builder(func.getContext());
+    SmallVector<Operation *> coralOps;
+
+    func.walk([&](Operation *op) {
+      if (op->getDialect() && op->getDialect()->getNamespace() == "coral" && op->getNumResults() > 0)
+        coralOps.push_back(op);
+    });
+
+    auto unwrapToMemref = [&](Value val, Location loc) -> Value {
+      if (auto toTensor = val.getDefiningOp<bufferization::ToTensorOp>())
+        return toTensor->getOperand(0);
+      auto tensorTy = cast<RankedTensorType>(val.getType());
+      auto memrefTy = MemRefType::get(tensorTy.getShape(), tensorTy.getElementType());
+      OperationState toBufState(loc, "bufferization.to_buffer");
+      toBufState.addOperands(val);
+      toBufState.addTypes(memrefTy);
+      return builder.create(toBufState)->getResult(0);
+    };
+
+    for (Operation *op : coralOps) {
+      Location loc = op->getLoc();
+      builder.setInsertionPoint(op);
+
+      SmallVector<Value> memrefOperands;
+      for (Value operand : op->getOperands())
+        memrefOperands.push_back(unwrapToMemref(operand, loc));
+
+      Value outMemref;
+      if (op->getName().getStringRef() == "coral.dma_pad") {
+        auto resTensorTy = cast<RankedTensorType>(op->getResult(0).getType());
+        auto dstMemrefTy = MemRefType::get(resTensorTy.getShape(), resTensorTy.getElementType());
+        outMemref = builder.create<memref::AllocOp>(loc, dstMemrefTy);
+        memrefOperands.push_back(outMemref);
+      } else {
+        outMemref = memrefOperands.back();
+      }
+
+      OperationState state(loc, op->getName());
+      state.addOperands(memrefOperands);
+      state.addAttributes(op->getAttrs());
+      builder.create(state);
+
+      Value replacementTensor = builder.create<bufferization::ToTensorOp>(
+          loc, op->getResult(0).getType(), outMemref);
+      op->getResult(0).replaceAllUsesWith(replacementTensor);
+      op->erase();
+    }
+  }
+};
 
 // ============================================================================
 // STAGE 1 REWRITE PATTERNS: Compute Kernels
@@ -340,4 +409,8 @@ std::unique_ptr<Pass> createCoralToLLVMPass() {
 
 void registerCoralToLLVMPass() {
   PassRegistration<CoralToLLVMPass>();
+}
+
+void registerBufferizeCoralPass() {
+  PassRegistration<BufferizeCoralPass>();
 }
