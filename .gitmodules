@@ -4,3 +4,6 @@
 [submodule "third_party/coralnpu"]
 	path = third_party/coralnpu
 	url = https://github.com/google-coral/coralnpu.git
+[submodule "third_party/coral-mpact"]
+	path = third_party/coral-mpact
+	url = https://github.com/google-coral/coralnpu-mpact.git
