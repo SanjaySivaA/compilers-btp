@@ -71,3 +71,7 @@ compilers-btp/
     └── workflows/
         └── mlir-ci.yml               # Builds compiler + runtime with RISCV support & runs lit
 ```
+
+## Dependencies
+
+Install **torch-mlir** using: `pip install torch-mlir -f https://llvm.github.io/torch-mlir/package-index/ --extra-index-url https://download.pytorch.org/whl/cpu`
